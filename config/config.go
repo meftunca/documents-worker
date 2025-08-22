@@ -7,14 +7,17 @@ import (
 	"time"
 )
 
+// Config holds all configuration for the documents worker
 type Config struct {
 	Server   ServerConfig
 	Redis    RedisConfig
 	Worker   WorkerConfig
 	External ExternalConfig
 	OCR      OCRConfig
+	Cache    CacheConfig
 }
 
+// ServerConfig holds HTTP server configuration
 type ServerConfig struct {
 	Port         string
 	ReadTimeout  time.Duration
@@ -23,6 +26,7 @@ type ServerConfig struct {
 	Environment  string
 }
 
+// RedisConfig holds Redis connection configuration
 type RedisConfig struct {
 	Host     string
 	Port     string
@@ -30,6 +34,7 @@ type RedisConfig struct {
 	DB       int
 }
 
+// WorkerConfig holds worker pool configuration
 type WorkerConfig struct {
 	MaxConcurrency int
 	QueueName      string
@@ -37,24 +42,39 @@ type WorkerConfig struct {
 	RetryDelay     time.Duration
 }
 
+// ExternalConfig holds external tools configuration
 type ExternalConfig struct {
 	VipsEnabled     bool
 	FFmpegPath      string
 	LibreOfficePath string
 	MutoolPath      string
 	TesseractPath   string
+	PyMuPDFScript   string
+	WkHtmlToPdfPath string
+	PandocPath      string
 }
 
+// OCRConfig holds OCR processing configuration
 type OCRConfig struct {
 	Language string
 	DPI      int
 	PSM      int
 }
 
+// CacheConfig holds cache configuration
+type CacheConfig struct {
+	Enabled    bool
+	TTL        time.Duration
+	MaxSize    int64
+	Directory  string
+	CleanupAge time.Duration
+}
+
+// Load reads configuration from environment variables and returns Config
 func Load() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Port:         getEnv("SERVER_PORT", "3001"),
+			Port:         getEnv("PORT", "3001"),
 			ReadTimeout:  getDurationEnv("SERVER_READ_TIMEOUT", 30*time.Second),
 			WriteTimeout: getDurationEnv("SERVER_WRITE_TIMEOUT", 30*time.Second),
 			IdleTimeout:  getDurationEnv("SERVER_IDLE_TIMEOUT", 120*time.Second),
@@ -78,14 +98,26 @@ func Load() *Config {
 			LibreOfficePath: getEnv("LIBREOFFICE_PATH", "soffice"),
 			MutoolPath:      getEnv("MUTOOL_PATH", "mutool"),
 			TesseractPath:   getEnv("TESSERACT_PATH", "tesseract"),
+			PyMuPDFScript:   getEnv("PYMUPDF_SCRIPT", "./scripts"),
+			WkHtmlToPdfPath: getEnv("WKHTMLTOPDF_PATH", "wkhtmltopdf"),
+			PandocPath:      getEnv("PANDOC_PATH", "pandoc"),
 		},
 		OCR: OCRConfig{
 			Language: getEnv("OCR_LANGUAGE", "tur+eng"),
 			DPI:      getIntEnv("OCR_DPI", 300),
 			PSM:      getIntEnv("OCR_PSM", 1),
 		},
+		Cache: CacheConfig{
+			Enabled:    getBoolEnv("CACHE_ENABLED", true),
+			TTL:        getDurationEnv("CACHE_TTL", 24*time.Hour),
+			MaxSize:    getInt64Env("CACHE_MAX_SIZE", 1024*1024*1024), // 1GB
+			Directory:  getEnv("CACHE_DIRECTORY", "./cache"),
+			CleanupAge: getDurationEnv("CACHE_CLEANUP_AGE", 7*24*time.Hour), // 7 days
+		},
 	}
 }
+
+// Helper functions for environment variable parsing
 
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
@@ -100,6 +132,16 @@ func getIntEnv(key string, defaultValue int) int {
 			return intValue
 		}
 		log.Printf("Warning: Invalid integer value for %s: %s, using default: %d", key, value, defaultValue)
+	}
+	return defaultValue
+}
+
+func getInt64Env(key string, defaultValue int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		if int64Value, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return int64Value
+		}
+		log.Printf("Warning: Invalid int64 value for %s: %s, using default: %d", key, value, defaultValue)
 	}
 	return defaultValue
 }
@@ -119,7 +161,44 @@ func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
 		if duration, err := time.ParseDuration(value); err == nil {
 			return duration
 		}
-		log.Printf("Warning: Invalid duration value for %s: %s, using default: %v", key, value, defaultValue)
+		log.Printf("Warning: Invalid duration value for %s: %s, using default: %s", key, value, defaultValue)
 	}
 	return defaultValue
+}
+
+// GetDatabaseURL returns the Redis connection URL
+func (c *Config) GetRedisURL() string {
+	return c.Redis.Host + ":" + c.Redis.Port
+}
+
+// IsProduction returns true if running in production environment
+func (c *Config) IsProduction() bool {
+	return c.Server.Environment == "production"
+}
+
+// IsDevelopment returns true if running in development environment
+func (c *Config) IsDevelopment() bool {
+	return c.Server.Environment == "development"
+}
+
+// GetCacheDirectory returns the cache directory path
+func (c *Config) GetCacheDirectory() string {
+	return c.Cache.Directory
+}
+
+// Validate checks if the configuration is valid
+func (c *Config) Validate() error {
+	// Check if required external tools are available
+	if c.External.VipsEnabled {
+		// VIPS is optional, so we don't fail if not found
+	}
+
+	// Cache directory validation
+	if c.Cache.Enabled {
+		if err := os.MkdirAll(c.Cache.Directory, 0755); err != nil {
+			log.Printf("Warning: Failed to create cache directory %s: %v", c.Cache.Directory, err)
+		}
+	}
+
+	return nil
 }

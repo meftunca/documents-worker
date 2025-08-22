@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// Margins holds PDF margin configuration
+type Margins struct {
+	Top    string `json:"top"`
+	Right  string `json:"right"`
+	Bottom string `json:"bottom"`
+	Left   string `json:"left"`
+}
+
 type PDFGenerator struct {
 	config *config.ExternalConfig
 }
@@ -43,7 +51,7 @@ func NewPDFGenerator(externalConfig *config.ExternalConfig) *PDFGenerator {
 
 // GenerateFromHTML creates PDF from HTML content
 func (pg *PDFGenerator) GenerateFromHTML(htmlContent string, options *GenerationOptions) (*GenerationResult, error) {
-	startTime := time.Now()
+	// startTime := time.Now()
 
 	// Create temporary HTML file
 	htmlFile, err := os.CreateTemp("", "html-input-*.html")

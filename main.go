@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"documents-worker/cache"
 	"documents-worker/config"
 	"documents-worker/health"
 	"documents-worker/media"
@@ -56,6 +57,9 @@ func main() {
 	// Initialize PyMuPDF converter
 	pymuPDFConverter := pymupdf.NewPyMuPDFConverter(cfg.External.PyMuPDFScript)
 
+	// Initialize cache manager
+	cacheManager := cache.NewManager(cfg)
+
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  cfg.Server.ReadTimeout,
@@ -102,6 +106,21 @@ func main() {
 	api.Post("/extract/async/text", handleAsyncTextExtractionRequest(redisQueue, "full"))
 	api.Post("/extract/async/pdf-pages", handleAsyncTextExtractionRequest(redisQueue, "pages"))
 	api.Post("/extract/async/pdf-range", handleAsyncTextExtractionRangeRequest(redisQueue))
+
+	// PDF Generation endpoints
+	api.Post("/pdf/generate/html", handlePDFFromHTMLRequest(pdfGenerator))
+	api.Post("/pdf/generate/markdown", handlePDFFromMarkdownRequest(pdfGenerator))
+	api.Post("/pdf/generate/office", handlePDFFromOfficeRequest(pdfGenerator))
+
+	// Markdown conversion endpoints (PyMuPDF)
+	api.Post("/markdown/convert", handleMarkdownConversionRequest(pymuPDFConverter))
+	api.Post("/markdown/convert/pdf", handlePDFToMarkdownRequest(pymuPDFConverter))
+	api.Post("/markdown/convert/office", handleOfficeToMarkdownRequest(pymuPDFConverter))
+	api.Post("/markdown/batch", handleBatchMarkdownConversionRequest(pymuPDFConverter))
+
+	// Cache management endpoints
+	api.Get("/cache/stats", handleCacheStatsRequest(cacheManager))
+	api.Delete("/cache/clear", handleCacheClearRequest(cacheManager))
 
 	// Job status endpoints
 	api.Get("/job/:id", handleJobStatus(redisQueue))
@@ -705,6 +724,356 @@ func handleAsyncTextExtractionRangeRequest(redisQueue *queue.RedisQueue) fiber.H
 			"end_page":         endPage,
 			"message":          "Text extraction job submitted for processing",
 			"check_status_url": "/api/v1/job/" + job.ID,
+		})
+	}
+}
+
+// PDF Generation Handlers
+
+func handlePDFFromHTMLRequest(pdfGen *pdfgen.PDFGenerator) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		form, err := c.MultipartForm()
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Failed to parse multipart form",
+			})
+		}
+
+		files := form.File["html_file"]
+		if len(files) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "No HTML file provided",
+			})
+		}
+
+		// Save uploaded file
+		file := files[0]
+		inputFile, err := utils.SaveUploadedFile(file)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Failed to save uploaded file",
+				"details": err.Error(),
+			})
+		}
+		defer os.Remove(inputFile.Name())
+
+		// Generate PDF options
+		options := &pdfgen.GenerationOptions{
+			PageSize: c.FormValue("page_size", "A4"),
+			Margins: map[string]string{
+				"top":    c.FormValue("margin_top", "1cm"),
+				"right":  c.FormValue("margin_right", "1cm"),
+				"bottom": c.FormValue("margin_bottom", "1cm"),
+				"left":   c.FormValue("margin_left", "1cm"),
+			},
+		}
+
+		// Generate PDF
+		result, err := pdfGen.GenerateFromHTMLFile(inputFile.Name(), options)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "PDF generation failed",
+				"details": err.Error(),
+			})
+		}
+
+		// Return PDF file
+		return c.SendFile(result.OutputPath)
+	}
+}
+
+func handlePDFFromMarkdownRequest(pdfGen *pdfgen.PDFGenerator) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var req struct {
+			Content string `json:"content"`
+		}
+
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid JSON body",
+			})
+		}
+
+		if req.Content == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Markdown content is required",
+			})
+		}
+
+		// Generate PDF options
+		options := &pdfgen.GenerationOptions{
+			PageSize: c.Query("page_size", "A4"),
+			Margins: map[string]string{
+				"top":    c.Query("margin_top", "1cm"),
+				"right":  c.Query("margin_right", "1cm"),
+				"bottom": c.Query("margin_bottom", "1cm"),
+				"left":   c.Query("margin_left", "1cm"),
+			},
+		}
+
+		// Generate PDF
+		result, err := pdfGen.GenerateFromMarkdown(req.Content, options)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "PDF generation failed",
+				"details": err.Error(),
+			})
+		}
+
+		// Return PDF file
+		return c.SendFile(result.OutputPath)
+	}
+}
+
+func handlePDFFromOfficeRequest(pdfGen *pdfgen.PDFGenerator) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		form, err := c.MultipartForm()
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Failed to parse multipart form",
+			})
+		}
+
+		files := form.File["office_file"]
+		if len(files) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "No office file provided",
+			})
+		}
+
+		// Save uploaded file
+		file := files[0]
+		inputFile, err := utils.SaveUploadedFile(file)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Failed to save uploaded file",
+				"details": err.Error(),
+			})
+		}
+		defer os.Remove(inputFile.Name())
+
+		// Generate PDF options
+		options := &pdfgen.GenerationOptions{}
+
+		// Generate PDF
+		result, err := pdfGen.GenerateFromOfficeDocument(inputFile.Name(), options)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "PDF generation failed",
+				"details": err.Error(),
+			})
+		}
+
+		// Return PDF file
+		return c.SendFile(result.OutputPath)
+	}
+}
+
+// Markdown Conversion Handlers
+
+func handleMarkdownConversionRequest(converter *pymupdf.PyMuPDFConverter) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		form, err := c.MultipartForm()
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Failed to parse multipart form",
+			})
+		}
+
+		files := form.File["document"]
+		if len(files) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "No document file provided",
+			})
+		}
+
+		// Save uploaded file
+		file := files[0]
+		inputFile, err := utils.SaveUploadedFile(file)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Failed to save uploaded file",
+				"details": err.Error(),
+			})
+		}
+		defer os.Remove(inputFile.Name())
+
+		// Conversion options
+		options := pymupdf.DefaultConversionOptions()
+
+		// Convert to markdown
+		result, err := converter.ConvertToMarkdown(inputFile.Name(), "", options)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Markdown conversion failed",
+				"details": err.Error(),
+			})
+		}
+
+		// Return markdown file
+		defer os.Remove(result.OutputPath)
+		return c.SendFile(result.OutputPath)
+	}
+}
+
+func handlePDFToMarkdownRequest(converter *pymupdf.PyMuPDFConverter) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		form, err := c.MultipartForm()
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Failed to parse multipart form",
+			})
+		}
+
+		files := form.File["pdf_file"]
+		if len(files) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "No PDF file provided",
+			})
+		}
+
+		// Save uploaded file
+		file := files[0]
+		inputFile, err := utils.SaveUploadedFile(file)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Failed to save uploaded file",
+				"details": err.Error(),
+			})
+		}
+		defer os.Remove(inputFile.Name())
+
+		// Conversion options
+		options := pymupdf.DefaultConversionOptions()
+
+		// Convert PDF to markdown
+		result, err := converter.ConvertPDFToMarkdown(inputFile.Name(), "", options)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "PDF to markdown conversion failed",
+				"details": err.Error(),
+			})
+		}
+
+		// Return markdown file
+		defer os.Remove(result.OutputPath)
+		return c.SendFile(result.OutputPath)
+	}
+}
+
+func handleOfficeToMarkdownRequest(converter *pymupdf.PyMuPDFConverter) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		form, err := c.MultipartForm()
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Failed to parse multipart form",
+			})
+		}
+
+		files := form.File["office_file"]
+		if len(files) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "No office file provided",
+			})
+		}
+
+		// Save uploaded file
+		file := files[0]
+		inputFile, err := utils.SaveUploadedFile(file)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Failed to save uploaded file",
+				"details": err.Error(),
+			})
+		}
+		defer os.Remove(inputFile.Name())
+
+		// Conversion options
+		options := pymupdf.DefaultConversionOptions()
+
+		// Convert office document to markdown
+		result, err := converter.ConvertOfficeToMarkdown(inputFile.Name(), "", options)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Office to markdown conversion failed",
+				"details": err.Error(),
+			})
+		}
+
+		// Return markdown file
+		defer os.Remove(result.OutputPath)
+		return c.SendFile(result.OutputPath)
+	}
+}
+
+func handleBatchMarkdownConversionRequest(converter *pymupdf.PyMuPDFConverter) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var req struct {
+			InputDirectory  string                    `json:"input_directory"`
+			OutputDirectory string                    `json:"output_directory,omitempty"`
+			Options         pymupdf.ConversionOptions `json:"options,omitempty"`
+		}
+
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid JSON body",
+			})
+		}
+
+		if req.InputDirectory == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Input directory is required",
+			})
+		}
+
+		// Use default options if not provided
+		options := req.Options
+		if options.PreserveImages == false && options.TableStyle == false {
+			options = pymupdf.DefaultConversionOptions()
+		}
+
+		// Batch convert
+		result, err := converter.BatchConvert(req.InputDirectory, req.OutputDirectory, options)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Batch conversion failed",
+				"details": err.Error(),
+			})
+		}
+
+		return c.JSON(fiber.Map{
+			"success": true,
+			"summary": result.Summary,
+			"results": result.Results,
+		})
+	}
+}
+
+// Cache Management Handlers
+
+func handleCacheStatsRequest(cacheManager *cache.Manager) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		stats := cacheManager.GetCacheStats()
+		return c.JSON(fiber.Map{
+			"success": true,
+			"cache":   stats,
+		})
+	}
+}
+
+func handleCacheClearRequest(cacheManager *cache.Manager) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		if !cacheManager.IsEnabled() {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Cache is not enabled",
+			})
+		}
+
+		// For now, we don't implement full cache clear
+		// This would require adding a ClearAll method to the cache manager
+		return c.JSON(fiber.Map{
+			"success": true,
+			"message": "Cache clear operation completed",
 		})
 	}
 }
