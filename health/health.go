@@ -11,8 +11,11 @@ import (
 )
 
 type HealthChecker struct {
-	config *config.Config
-	queue  *queue.RedisQueue
+	config           *config.Config
+	queue            *queue.RedisQueue
+	cachedServices   map[string]ServiceInfo
+	lastServiceCheck time.Time
+	serviceCheckTTL  time.Duration
 }
 
 type HealthStatus struct {
@@ -47,13 +50,15 @@ var startTime = time.Now()
 
 func NewHealthChecker(config *config.Config, queue *queue.RedisQueue) *HealthChecker {
 	return &HealthChecker{
-		config: config,
-		queue:  queue,
+		config:          config,
+		queue:           queue,
+		cachedServices:  make(map[string]ServiceInfo),
+		serviceCheckTTL: 5 * time.Minute, // Cache service checks for 5 minutes
 	}
 }
 
 func (h *HealthChecker) GetHealthStatus() HealthStatus {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	status := HealthStatus{
@@ -68,14 +73,10 @@ func (h *HealthChecker) GetHealthStatus() HealthStatus {
 		},
 	}
 
-	// Check external services
-	h.checkFFmpeg(&status)
-	h.checkVips(&status)
-	h.checkLibreOffice(&status)
-	h.checkMutool(&status)
-	h.checkTesseract(&status)
+	// Check external services with caching
+	h.checkServicesWithCache(&status)
 
-	// Check queue
+	// Check queue (always fresh)
 	h.checkQueue(ctx, &status)
 
 	// Determine overall status
@@ -90,6 +91,33 @@ func (h *HealthChecker) GetHealthStatus() HealthStatus {
 	}
 
 	return status
+}
+
+func (h *HealthChecker) checkServicesWithCache(status *HealthStatus) {
+	// Check if we need to refresh cached services
+	if time.Since(h.lastServiceCheck) > h.serviceCheckTTL || len(h.cachedServices) == 0 {
+		h.refreshServiceCache()
+		h.lastServiceCheck = time.Now()
+	}
+
+	// Use cached services
+	for name, service := range h.cachedServices {
+		status.Services[name] = service
+	}
+}
+
+func (h *HealthChecker) refreshServiceCache() {
+	tempStatus := HealthStatus{Services: make(map[string]ServiceInfo)}
+
+	// Check external services
+	h.checkFFmpeg(&tempStatus)
+	h.checkVips(&tempStatus)
+	h.checkLibreOffice(&tempStatus)
+	h.checkMutool(&tempStatus)
+	h.checkTesseract(&tempStatus)
+
+	// Update cache
+	h.cachedServices = tempStatus.Services
 }
 
 func (h *HealthChecker) checkFFmpeg(status *HealthStatus) {
@@ -235,7 +263,11 @@ func (h *HealthChecker) checkQueue(ctx context.Context, status *HealthStatus) {
 		return
 	}
 
-	stats, err := h.queue.GetQueueStats(ctx)
+	// Use a shorter timeout for queue check
+	queueCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+
+	stats, err := h.queue.GetQueueStats(queueCtx)
 	if err != nil {
 		status.Queue = QueueInfo{
 			Connected: false,
@@ -290,6 +322,34 @@ func (h *HealthChecker) LivenessHandler(c *fiber.Ctx) error {
 	// Simple liveness check - if we can respond, we're alive
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"status":    "alive",
+		"timestamp": time.Now(),
+		"uptime":    time.Since(startTime).String(),
+	})
+}
+
+// FastHealthHandler provides a lightweight health check
+func (h *HealthChecker) FastHealthHandler(c *fiber.Ctx) error {
+	// Quick Redis ping only
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	if h.queue == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"status": "unhealthy",
+			"reason": "Queue not initialized",
+		})
+	}
+
+	_, err := h.queue.GetQueueStats(ctx)
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"status": "unhealthy",
+			"reason": "Queue unavailable",
+		})
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"status":    "healthy",
 		"timestamp": time.Now(),
 		"uptime":    time.Since(startTime).String(),
 	})

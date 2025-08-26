@@ -1,0 +1,16 @@
+{
+  "name": "documents-worker-playwright",
+  "version": "1.0.0",
+  "description": "Playwright PDF generator for documents-worker",
+  "main": "pdf-generator.js",
+  "scripts": {
+    "install-browsers": "playwright install chromium",
+    "test": "node pdf-generator.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

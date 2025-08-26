@@ -25,6 +25,8 @@ type Worker struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
+	isRunning     bool
+	runningMutex  sync.RWMutex
 }
 
 type ProcessingJob struct {
@@ -52,49 +54,79 @@ func NewWorker(queue *queue.RedisQueue, config *config.Config) *Worker {
 }
 
 func (w *Worker) Start() {
-	log.Printf("Worker %s starting with max concurrency: %d", w.id, w.config.Worker.MaxConcurrency)
+	w.runningMutex.Lock()
+	defer w.runningMutex.Unlock()
 
-	for i := 0; i < w.config.Worker.MaxConcurrency; i++ {
-		w.wg.Add(1)
-		go w.workerRoutine(i)
+	if w.isRunning {
+		return
 	}
+
+	log.Printf("Worker %s starting", w.id)
+	w.isRunning = true
+
+	// Start single worker routine for this worker instance
+	w.wg.Add(1)
+	go w.workerRoutine()
 }
 
 func (w *Worker) Stop() {
+	w.runningMutex.Lock()
+	if !w.isRunning {
+		w.runningMutex.Unlock()
+		return
+	}
+	w.isRunning = false
+	w.runningMutex.Unlock()
+
 	log.Printf("Worker %s stopping...", w.id)
 	w.cancel()
 	w.wg.Wait()
 	log.Printf("Worker %s stopped", w.id)
 }
 
-func (w *Worker) workerRoutine(routineID int) {
+func (w *Worker) IsRunning() bool {
+	w.runningMutex.RLock()
+	defer w.runningMutex.RUnlock()
+	return w.isRunning
+}
+
+func (w *Worker) workerRoutine() {
 	defer w.wg.Done()
 
-	log.Printf("Worker routine %d started", routineID)
+	log.Printf("Worker %s routine started", w.id)
 
 	for {
+		// Check if context is cancelled first
 		select {
 		case <-w.ctx.Done():
-			log.Printf("Worker routine %d stopping", routineID)
+			log.Printf("Worker %s routine stopping", w.id)
 			return
 		default:
-			job, err := w.queue.Dequeue(w.ctx)
-			if err != nil {
-				if w.ctx.Err() != nil {
-					return // Context cancelled
-				}
-				log.Printf("Worker routine %d: Failed to dequeue job: %v", routineID, err)
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			w.processJob(routineID, job)
 		}
+
+		// Try to dequeue job with context
+		job, err := w.queue.Dequeue(w.ctx)
+
+		if err != nil {
+			if w.ctx.Err() != nil {
+				log.Printf("Worker %s routine stopping due to context cancellation", w.id)
+				return // Context cancelled
+			}
+			// Redis timeout or no jobs available
+			if err.Error() == "redis: nil" {
+				continue // No jobs available, continue polling
+			}
+			log.Printf("Worker %s: Failed to dequeue job: %v", w.id, err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		w.processJob(job)
 	}
 }
 
-func (w *Worker) processJob(routineID int, job *queue.Job) {
-	log.Printf("Worker routine %d: Processing job %s (type: %s)", routineID, job.ID, job.Type)
+func (w *Worker) processJob(job *queue.Job) {
+	log.Printf("Worker %s: Processing job %s (type: %s)", w.id, job.ID, job.Type)
 
 	startTime := time.Now()
 
@@ -110,12 +142,12 @@ func (w *Worker) processJob(routineID int, job *queue.Job) {
 	default:
 		err := fmt.Sprintf("Unknown job type: %s", job.Type)
 		w.queue.FailJob(context.Background(), job.ID, err)
-		log.Printf("Worker routine %d: %s", routineID, err)
+		log.Printf("Worker %s: %s", w.id, err)
 		return
 	}
 
 	duration := time.Since(startTime)
-	log.Printf("Worker routine %d: Job %s completed in %v", routineID, job.ID, duration)
+	log.Printf("Worker %s: Job %s completed in %v", w.id, job.ID, duration)
 }
 
 func (w *Worker) processMediaJob(job *queue.Job) {

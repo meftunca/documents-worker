@@ -85,8 +85,13 @@ func (q *RedisQueue) Enqueue(ctx context.Context, job *Job) error {
 }
 
 func (q *RedisQueue) Dequeue(ctx context.Context) (*Job, error) {
-	result, err := q.client.BRPop(ctx, 0, q.config.QueueName).Result()
+	// Use a timeout for BRPOP to allow graceful shutdown
+	result, err := q.client.BRPop(ctx, 5*time.Second, q.config.QueueName).Result()
 	if err != nil {
+		// Check if it's a timeout or context cancellation
+		if err == redis.Nil || ctx.Err() != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to dequeue job: %w", err)
 	}
 

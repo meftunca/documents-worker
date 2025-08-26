@@ -2,6 +2,7 @@ package pdfgen
 
 import (
 	"documents-worker/config"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -407,4 +408,269 @@ th {
     font-weight: bold;
 }
 `
+}
+
+// GenerateFromHTMLWithPlaywright creates PDF using Playwright (modern alternative to wkhtmltopdf)
+func (pg *PDFGenerator) GenerateFromHTMLWithPlaywright(htmlContent string, options *GenerationOptions) (*GenerationResult, error) {
+	// Create temporary HTML file
+	htmlFile, err := os.CreateTemp("", "input-*.html")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp HTML file: %w", err)
+	}
+	defer os.Remove(htmlFile.Name())
+
+	// Write HTML content
+	_, err = htmlFile.WriteString(htmlContent)
+	if err != nil {
+		htmlFile.Close()
+		return nil, fmt.Errorf("failed to write HTML content: %w", err)
+	}
+	htmlFile.Close()
+
+	return pg.GenerateFromHTMLFileWithPlaywright(htmlFile.Name(), options)
+}
+
+// GenerateFromHTMLFileWithPlaywright creates PDF from HTML file using Playwright
+func (pg *PDFGenerator) GenerateFromHTMLFileWithPlaywright(htmlPath string, options *GenerationOptions) (*GenerationResult, error) {
+	startTime := time.Now()
+
+	// Create output PDF file
+	outputFile, err := os.CreateTemp("", "generated-*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp PDF file: %w", err)
+	}
+	outputFile.Close()
+
+	// Build Playwright options
+	playwrightOptions := pg.buildPlaywrightOptions(options)
+
+	// Get script path
+	scriptPath, err := findPlaywrightScript()
+	if err != nil {
+		return nil, fmt.Errorf("playwright script not found: %w - run ./scripts/setup-playwright.sh first", err)
+	}
+
+	// Execute Playwright script
+	cmd := exec.Command("node", scriptPath, htmlPath, outputFile.Name(), playwrightOptions)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		return nil, fmt.Errorf("playwright execution failed: %w, output: %s", err, string(output))
+	}
+
+	// Parse result from Playwright script
+	var playwrightResult struct {
+		Success     bool   `json:"success"`
+		OutputPath  string `json:"outputPath"`
+		FileSize    int64  `json:"fileSize"`
+		GeneratedAt string `json:"generatedAt"`
+		Error       string `json:"error"`
+	}
+
+	if err := parseJSONOutput(string(output), &playwrightResult); err != nil {
+		return nil, fmt.Errorf("failed to parse playwright output: %w", err)
+	}
+
+	if !playwrightResult.Success {
+		return nil, fmt.Errorf("playwright generation failed: %s", playwrightResult.Error)
+	}
+
+	// Get file info
+	fileInfo, err := os.Stat(outputFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	// Get page count
+	pageCount, _ := pg.getPDFPageCount(outputFile.Name())
+
+	result := &GenerationResult{
+		OutputPath:  outputFile.Name(),
+		InputType:   "html",
+		GeneratedAt: startTime,
+		Duration:    time.Since(startTime),
+		FileSize:    fileInfo.Size(),
+		PageCount:   pageCount,
+		Metadata: map[string]interface{}{
+			"generator": "playwright",
+			"engine":    "chromium",
+		},
+	}
+
+	return result, nil
+}
+
+// GenerateFromURLWithPlaywright creates PDF from URL using Playwright
+func (pg *PDFGenerator) GenerateFromURLWithPlaywright(url string, options *GenerationOptions) (*GenerationResult, error) {
+	startTime := time.Now()
+
+	// Create output PDF file
+	outputFile, err := os.CreateTemp("", "generated-*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp PDF file: %w", err)
+	}
+	outputFile.Close()
+
+	// Build Playwright options
+	playwrightOptions := pg.buildPlaywrightOptions(options)
+
+	// Get script path
+	scriptPath, err := findPlaywrightScript()
+	if err != nil {
+		return nil, fmt.Errorf("playwright script not found: %w - run ./scripts/setup-playwright.sh first", err)
+	}
+
+	// Execute Playwright script with URL
+	cmd := exec.Command("node", scriptPath, url, outputFile.Name(), playwrightOptions)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		return nil, fmt.Errorf("playwright URL generation failed: %w, output: %s", err, string(output))
+	}
+
+	// Parse result
+	var playwrightResult struct {
+		Success     bool   `json:"success"`
+		OutputPath  string `json:"outputPath"`
+		FileSize    int64  `json:"fileSize"`
+		GeneratedAt string `json:"generatedAt"`
+		Error       string `json:"error"`
+	}
+
+	if err := parseJSONOutput(string(output), &playwrightResult); err != nil {
+		return nil, fmt.Errorf("failed to parse playwright output: %w", err)
+	}
+
+	if !playwrightResult.Success {
+		return nil, fmt.Errorf("playwright URL generation failed: %s", playwrightResult.Error)
+	}
+
+	// Get file info
+	fileInfo, err := os.Stat(outputFile.Name())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	// Get page count
+	pageCount, _ := pg.getPDFPageCount(outputFile.Name())
+
+	result := &GenerationResult{
+		OutputPath:  outputFile.Name(),
+		InputType:   "url",
+		GeneratedAt: startTime,
+		Duration:    time.Since(startTime),
+		FileSize:    fileInfo.Size(),
+		PageCount:   pageCount,
+		Metadata: map[string]interface{}{
+			"generator":  "playwright",
+			"engine":     "chromium",
+			"source_url": url,
+		},
+	}
+
+	return result, nil
+}
+
+// buildPlaywrightOptions converts GenerationOptions to JSON string for Playwright script
+func (pg *PDFGenerator) buildPlaywrightOptions(options *GenerationOptions) string {
+	if options == nil {
+		return "{}"
+	}
+
+	playwrightOpts := map[string]interface{}{
+		"pageSize":    options.PageSize,
+		"orientation": options.Orientation,
+		"timeout":     30000, // 30 seconds default
+		"waitTime":    1000,  // 1 second wait
+	}
+
+	// Add margins
+	if options.Margins != nil {
+		if top, ok := options.Margins["top"]; ok {
+			playwrightOpts["marginTop"] = top
+		}
+		if right, ok := options.Margins["right"]; ok {
+			playwrightOpts["marginRight"] = right
+		}
+		if bottom, ok := options.Margins["bottom"]; ok {
+			playwrightOpts["marginBottom"] = bottom
+		}
+		if left, ok := options.Margins["left"]; ok {
+			playwrightOpts["marginLeft"] = left
+		}
+	}
+
+	// Convert to JSON
+	jsonBytes, err := json.Marshal(playwrightOpts)
+	if err != nil {
+		return "{}"
+	}
+
+	return string(jsonBytes)
+}
+
+// parseJSONOutput parses JSON output from Playwright script
+func parseJSONOutput(output string, target interface{}) error {
+	// Find the last JSON object in output (in case there are logs before it)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	var jsonLine string
+
+	// Look for the last line that looks like JSON
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+			jsonLine = line
+			break
+		}
+	}
+
+	if jsonLine == "" {
+		return fmt.Errorf("no JSON output found in: %s", output)
+	}
+
+	return json.Unmarshal([]byte(jsonLine), target)
+}
+
+// findPlaywrightScript searches for the Playwright script starting from current directory
+func findPlaywrightScript() (string, error) {
+	// Common paths to search
+	searchPaths := []string{
+		"scripts/playwright/pdf-generator.js",
+		"../scripts/playwright/pdf-generator.js",
+		"../../scripts/playwright/pdf-generator.js",
+		"./scripts/playwright/pdf-generator.js",
+	}
+
+	// Get working directory and search from there
+	wd, _ := os.Getwd()
+
+	// Try absolute path from working directory
+	for _, relPath := range searchPaths {
+		fullPath := filepath.Join(wd, relPath)
+		if _, err := os.Stat(fullPath); err == nil {
+			return fullPath, nil
+		}
+	}
+
+	// Try to find based on Go module structure
+	// Look for go.mod to find project root
+	dir := wd
+	for i := 0; i < 10; i++ { // Limit search depth
+		goModPath := filepath.Join(dir, "go.mod")
+		if _, err := os.Stat(goModPath); err == nil {
+			// Found project root
+			scriptPath := filepath.Join(dir, "scripts", "playwright", "pdf-generator.js")
+			if _, err := os.Stat(scriptPath); err == nil {
+				return scriptPath, nil
+			}
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // Reached filesystem root
+		}
+		dir = parent
+	}
+
+	return "", fmt.Errorf("playwright script not found in any of the expected locations")
 }

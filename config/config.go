@@ -36,22 +36,29 @@ type RedisConfig struct {
 
 // WorkerConfig holds worker pool configuration
 type WorkerConfig struct {
-	MaxConcurrency int
-	QueueName      string
-	RetryCount     int
-	RetryDelay     time.Duration
+	MaxConcurrency     int
+	QueueName          string
+	RetryCount         int
+	RetryDelay         time.Duration
+	MinWorkers         int
+	ScaleUpThreshold   int64
+	ScaleDownThreshold int64
+	CheckInterval      time.Duration
+	ScaleDelay         time.Duration
 }
 
 // ExternalConfig holds external tools configuration
 type ExternalConfig struct {
-	VipsEnabled     bool
-	FFmpegPath      string
-	LibreOfficePath string
-	MutoolPath      string
-	TesseractPath   string
-	PyMuPDFScript   string
-	WkHtmlToPdfPath string
-	PandocPath      string
+	VipsEnabled       bool
+	FFmpegPath        string
+	LibreOfficePath   string
+	MutoolPath        string
+	TesseractPath     string
+	PyMuPDFScript     string
+	WkHtmlToPdfPath   string
+	PandocPath        string
+	NodeJSPath        string // Path to Node.js for Playwright
+	PlaywrightEnabled bool   // Enable Playwright PDF generation
 }
 
 // OCRConfig holds OCR processing configuration
@@ -87,20 +94,27 @@ func Load() *Config {
 			DB:       getIntEnv("REDIS_DB", 0),
 		},
 		Worker: WorkerConfig{
-			MaxConcurrency: getIntEnv("WORKER_MAX_CONCURRENCY", 10),
-			QueueName:      getEnv("WORKER_QUEUE_NAME", "documents_queue"),
-			RetryCount:     getIntEnv("WORKER_RETRY_COUNT", 3),
-			RetryDelay:     getDurationEnv("WORKER_RETRY_DELAY", 5*time.Second),
+			MaxConcurrency:     getIntEnv("WORKER_MAX_CONCURRENCY", 10),
+			QueueName:          getEnv("WORKER_QUEUE_NAME", "documents_queue"),
+			RetryCount:         getIntEnv("WORKER_RETRY_COUNT", 3),
+			RetryDelay:         getDurationEnv("WORKER_RETRY_DELAY", 5*time.Second),
+			MinWorkers:         getIntEnv("WORKER_MIN_WORKERS", 1),
+			ScaleUpThreshold:   int64(getIntEnv("WORKER_SCALE_UP_THRESHOLD", 10)),
+			ScaleDownThreshold: int64(getIntEnv("WORKER_SCALE_DOWN_THRESHOLD", 2)),
+			CheckInterval:      getDurationEnv("WORKER_CHECK_INTERVAL", 10*time.Second),
+			ScaleDelay:         getDurationEnv("WORKER_SCALE_DELAY", 30*time.Second),
 		},
 		External: ExternalConfig{
-			VipsEnabled:     getBoolEnv("VIPS_ENABLED", true),
-			FFmpegPath:      getEnv("FFMPEG_PATH", "ffmpeg"),
-			LibreOfficePath: getEnv("LIBREOFFICE_PATH", "soffice"),
-			MutoolPath:      getEnv("MUTOOL_PATH", "mutool"),
-			TesseractPath:   getEnv("TESSERACT_PATH", "tesseract"),
-			PyMuPDFScript:   getEnv("PYMUPDF_SCRIPT", "./scripts"),
-			WkHtmlToPdfPath: getEnv("WKHTMLTOPDF_PATH", "wkhtmltopdf"),
-			PandocPath:      getEnv("PANDOC_PATH", "pandoc"),
+			VipsEnabled:       getBoolEnv("VIPS_ENABLED", true),
+			FFmpegPath:        getEnv("FFMPEG_PATH", "ffmpeg"),
+			LibreOfficePath:   getEnv("LIBREOFFICE_PATH", "soffice"),
+			MutoolPath:        getEnv("MUTOOL_PATH", "mutool"),
+			TesseractPath:     getEnv("TESSERACT_PATH", "tesseract"),
+			PyMuPDFScript:     getEnv("PYMUPDF_SCRIPT", "./scripts"),
+			WkHtmlToPdfPath:   getEnv("WKHTMLTOPDF_PATH", "wkhtmltopdf"),
+			PandocPath:        getEnv("PANDOC_PATH", "pandoc"),
+			NodeJSPath:        getEnv("NODEJS_PATH", "node"),
+			PlaywrightEnabled: getBoolEnv("PLAYWRIGHT_ENABLED", true),
 		},
 		OCR: OCRConfig{
 			Language: getEnv("OCR_LANGUAGE", "tur+eng"),
