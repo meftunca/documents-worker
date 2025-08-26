@@ -4,17 +4,23 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // Config holds all configuration for the documents worker
 type Config struct {
-	Server   ServerConfig
-	Redis    RedisConfig
-	Worker   WorkerConfig
-	External ExternalConfig
-	OCR      OCRConfig
-	Cache    CacheConfig
+	Server     ServerConfig
+	Redis      RedisConfig
+	Worker     WorkerConfig
+	External   ExternalConfig
+	OCR        OCRConfig
+	Cache      CacheConfig
+	Logging    LoggingConfig    // v2.0: Structured logging configuration
+	Metrics    MetricsConfig    // v2.0: Prometheus metrics configuration
+	Validation ValidationConfig // v2.0: Input validation configuration
+	Security   SecurityConfig   // v2.0: Security configuration
+	Health     HealthConfig     // v2.0: Health check configuration
 }
 
 // ServerConfig holds HTTP server configuration
@@ -77,6 +83,63 @@ type CacheConfig struct {
 	CleanupAge time.Duration
 }
 
+// LoggingConfig holds logging configuration for v2.0
+type LoggingConfig struct {
+	Level      string `json:"level" validate:"oneof=trace debug info warn error fatal panic"`
+	Format     string `json:"format" validate:"oneof=json console"`
+	Output     string `json:"output" validate:"oneof=stdout stderr file"`
+	Filename   string `json:"filename,omitempty"`
+	TimeFormat string `json:"time_format"`
+	Structured bool   `json:"structured"`
+}
+
+// MetricsConfig holds Prometheus metrics configuration for v2.0
+type MetricsConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Port      string `json:"port"`
+	Path      string `json:"path"`
+	Namespace string `json:"namespace"`
+	Subsystem string `json:"subsystem"`
+}
+
+// ValidationConfig holds input validation configuration for v2.0
+type ValidationConfig struct {
+	MaxFileSize        int64    `json:"max_file_size"`
+	MinFileSize        int64    `json:"min_file_size"`
+	AllowedMimeTypes   []string `json:"allowed_mime_types"`
+	AllowedExtensions  []string `json:"allowed_extensions"`
+	MaxConcurrentReqs  int      `json:"max_concurrent_reqs"`
+	MaxProcessingTime  int      `json:"max_processing_time"`
+	RequireContentType bool     `json:"require_content_type"`
+	ScanForMalware     bool     `json:"scan_for_malware"`
+	MaxChunkSize       int      `json:"max_chunk_size"`
+	MinChunkSize       int      `json:"min_chunk_size"`
+	MaxChunkOverlap    int      `json:"max_chunk_overlap"`
+}
+
+// SecurityConfig holds security configuration for v2.0
+type SecurityConfig struct {
+	RateLimitEnabled    bool          `json:"rate_limit_enabled"`
+	RateLimitPerMinute  int           `json:"rate_limit_per_minute"`
+	CorsEnabled         bool          `json:"cors_enabled"`
+	CorsAllowedOrigins  []string      `json:"cors_allowed_origins"`
+	RequestTimeoutLimit time.Duration `json:"request_timeout_limit"`
+	MaxRequestBodySize  int64         `json:"max_request_body_size"`
+	TrustedProxies      []string      `json:"trusted_proxies"`
+}
+
+// HealthConfig holds health check configuration for v2.0
+type HealthConfig struct {
+	Enabled       bool          `json:"enabled"`
+	Port          string        `json:"port"`
+	Path          string        `json:"path"`
+	CheckInterval time.Duration `json:"check_interval"`
+	Timeout       time.Duration `json:"timeout"`
+	ReadinessPath string        `json:"readiness_path"`
+	LivenessPath  string        `json:"liveness_path"`
+	StartupPath   string        `json:"startup_path"`
+}
+
 // Load reads configuration from environment variables and returns Config
 func Load() *Config {
 	return &Config{
@@ -128,6 +191,70 @@ func Load() *Config {
 			Directory:  getEnv("CACHE_DIRECTORY", "./cache"),
 			CleanupAge: getDurationEnv("CACHE_CLEANUP_AGE", 7*24*time.Hour), // 7 days
 		},
+		// v2.0: New configuration sections
+		Logging: LoggingConfig{
+			Level:      getEnv("LOG_LEVEL", "info"),
+			Format:     getEnv("LOG_FORMAT", "json"),
+			Output:     getEnv("LOG_OUTPUT", "stdout"),
+			Filename:   getEnv("LOG_FILENAME", "logs/app.log"),
+			TimeFormat: getEnv("LOG_TIME_FORMAT", "2006-01-02T15:04:05Z07:00"),
+			Structured: getBoolEnv("LOG_STRUCTURED", true),
+		},
+		Metrics: MetricsConfig{
+			Enabled:   getBoolEnv("METRICS_ENABLED", true),
+			Port:      getEnv("METRICS_PORT", "9090"),
+			Path:      getEnv("METRICS_PATH", "/metrics"),
+			Namespace: getEnv("METRICS_NAMESPACE", "documents"),
+			Subsystem: getEnv("METRICS_SUBSYSTEM", "worker"),
+		},
+		Validation: ValidationConfig{
+			MaxFileSize:        getInt64Env("VALIDATION_MAX_FILE_SIZE", 100*1024*1024), // 100MB
+			MinFileSize:        getInt64Env("VALIDATION_MIN_FILE_SIZE", 1),
+			MaxConcurrentReqs:  getIntEnv("VALIDATION_MAX_CONCURRENT_REQS", 10),
+			MaxProcessingTime:  getIntEnv("VALIDATION_MAX_PROCESSING_TIME", 300), // 5 minutes
+			RequireContentType: getBoolEnv("VALIDATION_REQUIRE_CONTENT_TYPE", true),
+			ScanForMalware:     getBoolEnv("VALIDATION_SCAN_FOR_MALWARE", false),
+			MaxChunkSize:       getIntEnv("VALIDATION_MAX_CHUNK_SIZE", 8000),
+			MinChunkSize:       getIntEnv("VALIDATION_MIN_CHUNK_SIZE", 100),
+			MaxChunkOverlap:    getIntEnv("VALIDATION_MAX_CHUNK_OVERLAP", 200),
+			AllowedMimeTypes: getStringSliceEnv("VALIDATION_ALLOWED_MIME_TYPES", []string{
+				"application/pdf",
+				"application/msword",
+				"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				"application/vnd.ms-excel",
+				"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+				"application/vnd.ms-powerpoint",
+				"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+				"text/plain", "text/markdown", "text/html", "text/csv",
+				"image/jpeg", "image/png", "image/webp", "image/avif",
+				"video/mp4", "video/avi", "video/quicktime",
+			}),
+			AllowedExtensions: getStringSliceEnv("VALIDATION_ALLOWED_EXTENSIONS", []string{
+				".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+				".txt", ".md", ".html", ".htm", ".csv",
+				".jpg", ".jpeg", ".png", ".webp", ".avif",
+				".mp4", ".avi", ".mov",
+			}),
+		},
+		Security: SecurityConfig{
+			RateLimitEnabled:    getBoolEnv("SECURITY_RATE_LIMIT_ENABLED", true),
+			RateLimitPerMinute:  getIntEnv("SECURITY_RATE_LIMIT_PER_MINUTE", 60),
+			CorsEnabled:         getBoolEnv("SECURITY_CORS_ENABLED", true),
+			CorsAllowedOrigins:  getStringSliceEnv("SECURITY_CORS_ALLOWED_ORIGINS", []string{"*"}),
+			RequestTimeoutLimit: getDurationEnv("SECURITY_REQUEST_TIMEOUT_LIMIT", 300*time.Second),
+			MaxRequestBodySize:  getInt64Env("SECURITY_MAX_REQUEST_BODY_SIZE", 100*1024*1024), // 100MB
+			TrustedProxies:      getStringSliceEnv("SECURITY_TRUSTED_PROXIES", []string{"127.0.0.1", "::1"}),
+		},
+		Health: HealthConfig{
+			Enabled:       getBoolEnv("HEALTH_ENABLED", true),
+			Port:          getEnv("HEALTH_PORT", "3002"),
+			Path:          getEnv("HEALTH_PATH", "/health"),
+			CheckInterval: getDurationEnv("HEALTH_CHECK_INTERVAL", 30*time.Second),
+			Timeout:       getDurationEnv("HEALTH_TIMEOUT", 5*time.Second),
+			ReadinessPath: getEnv("HEALTH_READINESS_PATH", "/ready"),
+			LivenessPath:  getEnv("HEALTH_LIVENESS_PATH", "/live"),
+			StartupPath:   getEnv("HEALTH_STARTUP_PATH", "/startup"),
+		},
 	}
 }
 
@@ -176,6 +303,22 @@ func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
 			return duration
 		}
 		log.Printf("Warning: Invalid duration value for %s: %s, using default: %s", key, value, defaultValue)
+	}
+	return defaultValue
+}
+
+func getStringSliceEnv(key string, defaultValue []string) []string {
+	if value := os.Getenv(key); value != "" {
+		// Split by comma and trim spaces
+		var result []string
+		for _, item := range strings.Split(value, ",") {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
 	}
 	return defaultValue
 }
