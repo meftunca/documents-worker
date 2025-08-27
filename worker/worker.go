@@ -4,6 +4,7 @@ import (
 	"context"
 	"documents-worker/config"
 	"documents-worker/media"
+	"documents-worker/pkg/memory"
 	"documents-worker/queue"
 	"documents-worker/textextractor"
 	"documents-worker/types"
@@ -22,6 +23,7 @@ type Worker struct {
 	queue         *queue.RedisQueue
 	config        *config.Config
 	textExtractor *textextractor.TextExtractor
+	memoryManager *memory.Manager
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
@@ -42,12 +44,14 @@ type ProcessingJob struct {
 func NewWorker(queue *queue.RedisQueue, config *config.Config) *Worker {
 	ctx, cancel := context.WithCancel(context.Background())
 	textExtractor := textextractor.NewTextExtractor(&config.External)
+	memManager := memory.NewManager(nil)
 
 	return &Worker{
 		id:            uuid.New().String(),
 		queue:         queue,
 		config:        config,
 		textExtractor: textExtractor,
+		memoryManager: memManager,
 		ctx:           ctx,
 		cancel:        cancel,
 	}

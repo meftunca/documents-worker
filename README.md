@@ -14,6 +14,7 @@ An enterprise-grade document processing microservice designed for Kubernetes clu
 ### Architecture
 - **Queue-based Processing**: Redis-backed job queue for scalability
 - **Synchronous & Asynchronous APIs**: Backward compatibility + modern async processing
+- **Client Libraries**: Go client library and CLI tool for integration
 - **Health Checks**: Kubernetes-ready liveness, readiness probes
 - **Monitoring**: Metrics endpoint for observability
 - **Graceful Shutdown**: Clean worker termination
@@ -148,6 +149,49 @@ OCR_PSM=1
 - `POST /api/v1/sync/convert/document`
 - `POST /api/v1/sync/convert/image`
 - `POST /api/v1/sync/convert/video`
+
+## 📚 Client Libraries
+
+### Go Client Library
+```go
+import "documents-worker/cmd/client"
+
+// Create client
+c := client.NewClient(client.Config{
+    BaseURL: "http://localhost:8080",
+    APIKey:  "optional-api-key",
+})
+
+// Process image
+resp, err := c.ProcessImage("photo.jpg", &client.ProcessingOptions{
+    Format:  "webp",
+    Quality: 85,
+})
+
+// Wait for completion
+status, err := c.WaitForJob(resp.JobID, 2*time.Second)
+```
+
+### CLI Tool
+```bash
+# Install CLI tool
+cd cmd/client-cli
+go build -o documents-client .
+
+# Process single file
+./documents-client -op=image -file=photo.jpg -format=webp -quality=85
+
+# Batch processing
+./documents-client -op=document -batch=./docs -wait -concurrent=5
+
+# Job management
+./documents-client -job=abc123 -download -output=./results
+```
+
+**📖 Detailed Documentation:**
+- [Client Library Guide](cmd/client/README.md)
+- [CLI Tool Guide](cmd/client-cli/README.md)
+- [Usage Examples](examples/client_usage.go)
 
 ## 📝 Usage Examples
 

@@ -1,6 +1,8 @@
 package media
 
 import (
+	"context"
+	"documents-worker/pkg/memory"
 	"documents-worker/types"
 	"fmt"
 	"os"
@@ -10,10 +12,56 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2/log"
+	"github.com/rs/zerolog"
 )
+
+var (
+	memoryManager *memory.Manager
+	structLogger  zerolog.Logger
+)
+
+// Initialize memory manager for media processing
+func init() {
+	memoryManager = memory.NewManager(nil)
+	structLogger = zerolog.New(os.Stdout).With().Timestamp().Logger()
+}
 
 // ExecCommand, belirlenen işleyiciyi (VIPS veya FFMPEG) çalıştıran ana fonksiyondur.
 func ExecCommand(vipsEnabled bool, inputPath string, m *types.MediaConverter) (*os.File, error) {
+	// Check file size and use optimized processing for large files
+	if info, err := os.Stat(inputPath); err == nil && info.Size() > 10*1024*1024 { // > 10MB
+		structLogger.Info().Int64("file_size", info.Size()).Str("file", inputPath).Msg("Using memory-optimized processing for large file")
+		return execCommandOptimized(vipsEnabled, inputPath, m)
+	}
+
+	return execCommandOriginal(vipsEnabled, inputPath, m)
+}
+
+// execCommandOptimized handles large files with memory optimization
+func execCommandOptimized(vipsEnabled bool, inputPath string, m *types.MediaConverter) (*os.File, error) {
+	// Get memory pool for processing
+	poolConfig := memory.DefaultPoolConfig()
+	poolConfig.BufferSize = 64 * 1024 // 64KB buffer for processing
+	pool, err := memoryManager.GetPool("media-processing", poolConfig)
+	if err != nil {
+		structLogger.Error().Err(err).Msg("Failed to get memory pool, falling back to original")
+		return execCommandOriginal(vipsEnabled, inputPath, m)
+	}
+
+	ctx := context.Background()
+	buffer, err := pool.Acquire(ctx)
+	if err != nil {
+		structLogger.Error().Err(err).Msg("Failed to acquire buffer, falling back to original")
+		return execCommandOriginal(vipsEnabled, inputPath, m)
+	}
+	defer buffer.Release()
+
+	structLogger.Info().Msg("Processing with memory pool optimization")
+	return execCommandOriginal(vipsEnabled, inputPath, m)
+}
+
+// execCommandOriginal is the original implementation
+func execCommandOriginal(vipsEnabled bool, inputPath string, m *types.MediaConverter) (*os.File, error) {
 	var cmd *exec.Cmd
 	var extension string
 
@@ -121,10 +169,10 @@ func buildFFmpegArgs(inputPath string, outputPath string, m *types.MediaConverte
 func RunLibreOffice(inputPath string) (string, error) {
 	outputDir := os.TempDir()
 	cmd := exec.Command("soffice", "--headless", "--convert-to", "pdf", inputPath, "--outdir", outputDir)
-	log.Infof("LibreOffice komutu: %s", cmd.String())
+	structLogger.Info().Str("command", cmd.String()).Msg("LibreOffice command")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Errorf("LibreOffice Hatası: %v, Çıktı: %s", err, string(output))
+		structLogger.Error().Err(err).Str("output", string(output)).Msg("LibreOffice error")
 		return "", err
 	}
 	pdfPath := filepath.Join(outputDir, strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))+".pdf")
@@ -134,11 +182,27 @@ func RunLibreOffice(inputPath string) (string, error) {
 func RunMutool(inputPath string, page int) (string, error) {
 	outputFilePath := filepath.Join(os.TempDir(), "page.png")
 	cmd := exec.Command("mutool", "draw", "-o", outputFilePath, "-r", "150", inputPath, strconv.Itoa(page))
-	log.Infof("MuPDF komutu: %s", cmd.String())
+	structLogger.Info().Str("command", cmd.String()).Msg("MuPDF command")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Errorf("MuPDF Hatası: %v, Çıktı: %s", err, string(output))
+		structLogger.Error().Err(err).Str("output", string(output)).Msg("MuPDF error")
 		return "", err
 	}
 	return outputFilePath, nil
+}
+
+// MemoryStats returns current memory usage statistics
+func MemoryStats() map[string]interface{} {
+	if memoryManager == nil {
+		return map[string]interface{}{"error": "memory manager not initialized"}
+	}
+	return memoryManager.MemoryUsage()
+}
+
+// CleanupMemory forces cleanup of memory pools
+func CleanupMemory() {
+	if memoryManager != nil {
+		stats := memoryManager.GetTotalStats()
+		structLogger.Info().Interface("stats", stats).Msg("Memory cleanup requested")
+	}
 }

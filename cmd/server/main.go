@@ -9,8 +9,10 @@ import (
 	adapters "documents-worker/internal/adapters/secondary"
 	"documents-worker/internal/adapters/secondary/processors"
 	"documents-worker/internal/core/services"
+	cacheV2 "documents-worker/pkg/cache"
 	"documents-worker/pkg/errors"
 	"documents-worker/pkg/logger"
+	memorypool "documents-worker/pkg/memory"
 	"documents-worker/pkg/metrics"
 	"documents-worker/pkg/validator"
 	"documents-worker/queue"
@@ -28,9 +30,56 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// cacheMetricsWrapper adapts v1 metrics to v2 cache metrics interface
+type cacheMetricsWrapper struct {
+	metrics *metrics.Metrics
+}
+
+func (w *cacheMetricsWrapper) RecordCacheOperation(operation, result string, latency time.Duration, size int64) {
+	// Adapt to existing metrics interface
+	w.metrics.RecordMemoryOperation(operation, result, latency, size)
+}
+
+func (w *cacheMetricsWrapper) RecordCacheSize(size int64) {}
+
+func (w *cacheMetricsWrapper) RecordCacheMemory(memory int64) {}
+
 func main() {
-	// Load configuration
+	// Initialize v2.0 Advanced Configuration Manager
+	configManager := config.NewManager("production")
+
+	// Load configuration from file with hot-reload support
+	if err := configManager.LoadFromFile("config.yaml"); err != nil {
+		// Fallback to legacy config
+		fmt.Printf("⚠️  Advanced config failed, using legacy: %v\n", err)
+	} else {
+		// Start file watching for hot-reload
+		configManager.StartWatching()
+		defer configManager.StopWatching()
+
+		// Set up feature flags
+		configManager.SetFeatureFlag("memory_pool_enabled", true)
+		configManager.SetFeatureFlag("advanced_cache_enabled", true)
+		configManager.SetFeatureFlag("metrics_v2_enabled", true)
+	}
+
+	// Load configuration (fallback to legacy if advanced fails)
 	cfg := config.Load()
+
+	// Initialize v2.0 Memory Pool System
+	memPoolConfig := memorypool.DefaultPoolConfig()
+	memPoolConfig.InitialBuffers = 10
+	memPoolConfig.MaxBuffers = 100
+	memPoolConfig.BufferSize = 1024 * 1024            // 1MB buffers
+	memPoolConfig.AllocationLimit = 100 * 1024 * 1024 // 100MB limit
+	memPoolConfig.EnableMonitoring = true
+
+	memPool, err := memorypool.NewPool(memPoolConfig)
+	if err != nil {
+		fmt.Printf("❌ Failed to initialize memory pool: %v\n", err)
+		os.Exit(1)
+	}
+	defer memPool.Close()
 
 	// Initialize v2.0 structured logging
 	loggerConfig := &logger.Config{
@@ -53,7 +102,10 @@ func main() {
 	log.FromContext(ctx).Info().
 		Str("environment", cfg.Server.Environment).
 		Str("port", cfg.Server.Port).
-		Msg("📍 Configuration loaded")
+		Int("memory_pool_buffers", memPoolConfig.InitialBuffers).
+		Int64("memory_pool_limit_mb", memPoolConfig.AllocationLimit/(1024*1024)).
+		Bool("config_hot_reload", configManager != nil).
+		Msg("📍 Configuration loaded with v2.0 enhancements")
 
 	// Initialize v2.0 metrics
 	if cfg.Metrics.Enabled {
@@ -88,6 +140,33 @@ func main() {
 	}
 	defer redisQueue.Close()
 
+	// Initialize v2.0 Advanced Redis Cache
+	cacheConfig := cacheV2.DefaultCacheConfig()
+	cacheConfig.RedisURL = fmt.Sprintf("redis://%s:%s", cfg.Redis.Host, cfg.Redis.Port)
+	cacheConfig.DefaultTTL = time.Duration(cfg.Cache.TTL) * time.Second
+	cacheConfig.EnableMetrics = cfg.Metrics.Enabled
+	cacheConfig.Namespace = "docworker-v2"
+
+	// Create advanced cache with metrics integration
+	var advancedCache *cacheV2.Cache
+	flags := configManager.GetFeatureFlags()
+	if flags["advanced_cache_enabled"] {
+		metricsWrapper := &cacheMetricsWrapper{metrics.Get()}
+		logger := *log.FromContext(ctx)
+		advancedCache, err = cacheV2.NewCache(cacheConfig, logger, metricsWrapper)
+		if err != nil {
+			log.FromContext(ctx).Warn().Err(err).Msg("⚠️  Advanced cache failed, using legacy")
+			advancedCache = nil
+		} else {
+			defer advancedCache.Close()
+			log.FromContext(ctx).Info().
+				Str("redis_url", cacheConfig.RedisURL).
+				Dur("default_ttl", cacheConfig.DefaultTTL).
+				Msg("🚀 Advanced Redis cache initialized")
+		}
+	}
+
+	// Fallback to legacy cache if advanced cache failed
 	cacheManager := cache.NewCacheManager(cfg.Cache.Directory, cfg.Cache.TTL, cfg.Cache.Enabled)
 
 	// Create adapters for legacy components

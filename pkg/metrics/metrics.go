@@ -349,6 +349,18 @@ func (m *Metrics) RecordChunking(strategy, docType string, duration time.Duratio
 	m.ChunkSizeBytes.WithLabelValues(strategy).Observe(avgChunkSize)
 }
 
+// RecordMemoryOperation records memory pool operations (using existing system metrics)
+func (m *Metrics) RecordMemoryOperation(operation, status string, duration time.Duration, bytes int64) {
+	// Use document processing metrics for memory operations with correct label count
+	m.DocumentsProcessedTotal.WithLabelValues("memory", status).Inc()
+	if duration > 0 {
+		m.DocumentProcessingDuration.WithLabelValues("memory", operation).Observe(duration.Seconds())
+	}
+	if bytes > 0 {
+		m.DocumentSizeBytes.WithLabelValues("memory").Observe(float64(bytes))
+	}
+}
+
 // Global metrics instance
 var globalMetrics *Metrics
 
